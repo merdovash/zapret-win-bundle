@@ -9,6 +9,7 @@ import sys
 import os
 import threading
 import time
+import tempfile
 from pathlib import Path
 from typing import Optional, List, Callable
 
@@ -105,7 +106,94 @@ class WinWSRunner:
         Returns:
             List of command parts ready for subprocess
         """
-        return [str(self.winws_exe)] + params_list
+        return params_list
+    
+    def _generate_cmd_file(self, parameters: str) -> Path:
+        """
+        Generate a .cmd file similar to winws_run.cmd with user parameters
+        
+        Args:
+            parameters: Command-line parameters as a string
+            
+        Returns:
+            Path to the generated .cmd file
+        """
+        # Get the directory where winws.exe is located
+        winws_dir = self.winws_exe.parent
+        
+        # Escape the path for use in batch file (handle spaces and special characters)
+        winws_dir_str = str(winws_dir).replace('"', '""')
+        
+        # Build the winws command
+        winws_exe_name = self.winws_exe.name
+        if parameters:
+            winws_command = f'winws {parameters}'
+        else:
+            winws_command = 'winws'
+        
+        # Escape special characters in the command for echo
+        escaped_command = winws_command.replace('^', '^^').replace('&', '^&')
+        
+        # Generate .cmd file content similar to winws_run.cmd
+        cmd_content = f'''@echo off
+cd /d "{winws_dir_str}"
+echo Current directory: %CD%
+echo ^> {escaped_command}
+{winws_command}
+echo.
+echo winws.exe has exited. Press any key to close this window...
+pause
+'''
+        
+        # Create a temporary .cmd file
+        temp_dir = Path(tempfile.gettempdir())
+        cmd_file = temp_dir / f"winws_run_{int(time.time())}.cmd"
+        
+        # Write the .cmd file
+        with open(cmd_file, 'w', encoding='utf-8') as f:
+            f.write(cmd_content)
+        
+        return cmd_file
+    
+    def _execute_cmd_file(self, cmd_file: Path, debug: bool = False) -> subprocess.Popen:
+        """
+        Execute a .cmd file
+        
+        Args:
+            cmd_file: Path to the .cmd file to execute
+            debug: If True, show console window. If False, run in hidden console.
+            
+        Returns:
+            subprocess.Popen object for the started process
+        """
+        startupinfo = None
+        creation_flags = 0
+        
+        if sys.platform == 'win32':
+            if debug:
+                # Show console window
+                creation_flags = subprocess.CREATE_NEW_CONSOLE
+            else:
+                # Run in hidden console using STARTUPINFO
+                try:
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= 0x00000001  # STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = 0  # SW_HIDE
+                    creation_flags = subprocess.CREATE_NO_WINDOW
+                except (AttributeError, TypeError):
+                    creation_flags = subprocess.CREATE_NO_WINDOW
+        
+        # Execute the .cmd file
+        return subprocess.Popen(
+            ['cmd.exe', '/c', str(cmd_file)],
+            stdout=None,
+            stderr=None,
+            stdin=None,
+            cwd=str(self.winws_exe.parent),
+            startupinfo=startupinfo,
+            creationflags=creation_flags,
+            shell=False
+        )
     
     def _execute_process(self, winws_cmd: List[str], winws_dir: Path, debug: bool = False) -> subprocess.Popen:
         """
@@ -186,9 +274,14 @@ class WinWSRunner:
         # Get the directory where winws.exe is located
         winws_dir = self.winws_exe.parent
         
-        # Parse and build command
+        # Generate .cmd file from parameters
+        cmd_file = self._generate_cmd_file(parameters)
+        self.cmd_file_path = str(cmd_file)
+        
+        # Parse and build command for logging
         params_list = self._parse_parameters(parameters)
-        winws_cmd = self._build_winws_command(params_list)
+        winws_exe_name = self.winws_exe.name
+        winws_cmd = [winws_exe_name] + params_list if params_list else [winws_exe_name]
         
         # Log command execution
         log_message = f"> {' '.join(winws_cmd)}"
@@ -196,11 +289,8 @@ class WinWSRunner:
         if callback:
             callback(log_message)
         
-        # Execute process directly (GUI is already running with admin privileges)
-        self.process = self._execute_process(winws_cmd, winws_dir, debug=debug)
-        
-        # Clear cmd file path (no longer used)
-        self.cmd_file_path = None
+        # Execute the generated .cmd file
+        self.process = self._execute_cmd_file(cmd_file, debug=debug)
         
         # Record start time
         self.start_time = time.time()
