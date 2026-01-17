@@ -1,0 +1,59 @@
+name: Build run.exe
+
+on:
+  push:
+    branches:
+      - '*'
+  pull_request:
+    branches:
+      - '*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install Pillow pyinstaller
+        
+    - name: Run build script
+      run: .\build.cmd
+      
+    - name: Check if run.exe was created
+      id: check_exe
+      run: |
+        if (Test-Path "run.exe") {
+          echo "exe_exists=true" >> $env:GITHUB_OUTPUT
+        } else {
+          echo "exe_exists=false" >> $env:GITHUB_OUTPUT
+          exit 1
+        }
+        
+    - name: Commit run.exe to current branch
+      if: github.event_name == 'push' && steps.check_exe.outputs.exe_exists == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+        git add run.exe
+        $status = git status --porcelain run.exe
+        if ($status) {
+          git commit -m "Build: Add run.exe with new icons [skip ci]"
+          git push
+        } else {
+          Write-Host "No changes to commit for run.exe"
+        }
+
