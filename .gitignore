@@ -3,3 +3,4 @@ __pycache__
 winws_config.json
 icon_*
 icon.ico
+*.log
