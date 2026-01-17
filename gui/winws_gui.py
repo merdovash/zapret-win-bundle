@@ -10,14 +10,26 @@ from tkinter import messagebox
 from tkinter import scrolledtext
 import json
 import sys
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from winws_runner import WinWSRunner
 from admin_utils import is_admin, request_elevation
 
+# Windows-specific imports for AppUserModelID
+if sys.platform == 'win32':
+    try:
+        from ctypes import windll
+        WINDOWS_AVAILABLE = True
+    except ImportError:
+        WINDOWS_AVAILABLE = False
+else:
+    WINDOWS_AVAILABLE = False
+
 try:
     import pystray
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageTk
     TRAY_AVAILABLE = True
 except ImportError:
     TRAY_AVAILABLE = False
@@ -60,13 +72,116 @@ class WinWSGUI:
             
             root.destroy()
         
+        # Set AppUserModelID for Windows taskbar icon (must be done before creating window)
+        if WINDOWS_AVAILABLE:
+            try:
+                # Set a unique AppUserModelID for this application
+                windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.winws.gui")
+            except Exception as e:
+                print(f"Warning: Could not set AppUserModelID: {e}")
+        
         self.root = tk.Tk()
-        self.root.title("winws.exe GUI (Administrator)")
+        self.root.title("WinWS GUI (Administrator)")
         self.root.geometry("600x500")
         
         # Get the directory where this script is located
         script_dir = Path(__file__).parent
         project_root = script_dir.parent
+        
+        # Set window icon for both title bar and taskbar
+        # First try to use pre-generated icon.ico (best quality)
+        icon_dir = script_dir / "icon"
+        ico_path = icon_dir / "icon.ico"
+        icon_64_path = icon_dir / "icon_64x64.png"
+        icon_jpg_path = icon_dir / "icon.jpg"
+        
+        # Use pre-generated ICO file if available (best for taskbar)
+        if ico_path.exists():
+            try:
+                if sys.platform == 'win32':
+                    # Use pre-generated ICO for taskbar (best quality, multi-size)
+                    self.root.iconbitmap(str(ico_path))
+                    self.temp_ico_path = None  # No cleanup needed for pre-generated file
+                
+                # Set window icon - prefer pre-generated 64x64 PNG
+                if TRAY_AVAILABLE:
+                    if icon_64_path.exists():
+                        try:
+                            window_icon = Image.open(icon_64_path)
+                            if window_icon.mode != 'RGBA':
+                                window_icon = window_icon.convert('RGBA')
+                            icon_photo = ImageTk.PhotoImage(window_icon)
+                            self.root.iconphoto(False, icon_photo)
+                            self.root.icon_image = icon_photo
+                        except Exception as e:
+                            print(f"Warning: Could not load 64x64 icon: {e}")
+                            # Fallback to ICO
+                            try:
+                                ico_image = Image.open(ico_path)
+                                window_icon = ico_image.resize((64, 64), Image.Resampling.LANCZOS)
+                                icon_photo = ImageTk.PhotoImage(window_icon)
+                                self.root.iconphoto(False, icon_photo)
+                                self.root.icon_image = icon_photo
+                            except Exception:
+                                pass
+                    else:
+                        # Use ICO for window icon
+                        try:
+                            ico_image = Image.open(ico_path)
+                            window_icon = ico_image.resize((64, 64), Image.Resampling.LANCZOS)
+                            icon_photo = ImageTk.PhotoImage(window_icon)
+                            self.root.iconphoto(False, icon_photo)
+                            self.root.icon_image = icon_photo
+                        except Exception as e:
+                            print(f"Warning: Could not load ICO for window icon: {e}")
+            except Exception as e:
+                print(f"Warning: Could not use pre-generated ICO: {e}")
+                ico_path = None  # Fall back to creating from JPG
+        
+        # Fallback: create ICO from icon.jpg if pre-generated ICO doesn't exist
+        if not ico_path or not ico_path.exists():
+            if icon_jpg_path.exists():
+                try:
+                    if TRAY_AVAILABLE:
+                        # Load original image
+                        original_icon = Image.open(icon_jpg_path)
+                        if original_icon.mode != 'RGBA':
+                            original_icon = original_icon.convert('RGBA')
+                        
+                        # Create window icon (resized for title bar)
+                        window_icon = original_icon.copy()
+                        if window_icon.size[0] > 64 or window_icon.size[1] > 64:
+                            window_icon = window_icon.resize((64, 64), Image.Resampling.LANCZOS)
+                        
+                        # Create PhotoImage for iconphoto (title bar)
+                        icon_photo = ImageTk.PhotoImage(window_icon)
+                        self.root.iconphoto(False, icon_photo)
+                        self.root.icon_image = icon_photo
+                        
+                        # For Windows taskbar, create temporary ICO
+                        if sys.platform == 'win32':
+                            try:
+                                temp_ico = tempfile.NamedTemporaryFile(delete=False, suffix='.ico')
+                                temp_ico_path = temp_ico.name
+                                temp_ico.close()
+                                
+                                # Create ICO from original
+                                ico_image = original_icon.resize((256, 256), Image.Resampling.LANCZOS)
+                                ico_image.save(temp_ico_path, format='ICO')
+                                
+                                self.root.iconbitmap(temp_ico_path)
+                                self.temp_ico_path = temp_ico_path
+                            except Exception as e:
+                                print(f"Warning: Could not create ICO for taskbar: {e}")
+                                if hasattr(self, 'temp_ico_path') and os.path.exists(self.temp_ico_path):
+                                    try:
+                                        os.unlink(self.temp_ico_path)
+                                    except:
+                                        pass
+                    else:
+                        print("Warning: PIL not available, cannot set custom icon")
+                except (NameError, Exception) as e:
+                    print(f"Warning: Could not load icon: {e}")
         
         # Config file path
         self.config_file = script_dir / "winws_config.json"
@@ -77,6 +192,7 @@ class WinWSGUI:
         # System tray
         self.tray_icon = None
         self.hidden_to_tray = False
+        self.temp_ico_path = None  # For temporary ICO file cleanup
         
         # Load saved parameters
         self.saved_params = self.load_config()
@@ -306,10 +422,22 @@ class WinWSGUI:
                 # If tray not available, ask user
                 if messagebox.askokcancel("Quit", "winws.exe is still running. Stop it and quit?"):
                     self.stop_winws()
+                    # Clean up temporary ICO file
+                    if hasattr(self, 'temp_ico_path') and self.temp_ico_path and os.path.exists(self.temp_ico_path):
+                        try:
+                            os.unlink(self.temp_ico_path)
+                        except Exception:
+                            pass
                     self.root.destroy()
                 # Otherwise do nothing (keep window open)
         else:
             # Fully close if not running
+            # Clean up temporary ICO file
+            if hasattr(self, 'temp_ico_path') and self.temp_ico_path and os.path.exists(self.temp_ico_path):
+                try:
+                    os.unlink(self.temp_ico_path)
+                except Exception:
+                    pass
             self.root.destroy()
     
     def hide_to_tray(self):
@@ -338,10 +466,60 @@ class WinWSGUI:
     
     def create_tray_icon(self):
         """Create system tray icon"""
-        # Create a simple icon
-        image = Image.new('RGB', (64, 64), color='white')
-        draw = ImageDraw.Draw(image)
-        draw.rectangle([16, 16, 48, 48], fill='black')
+        # Load icon from file - prefer pre-generated 32x32 PNG, fallback to ICO or JPG
+        script_dir = Path(__file__).parent
+        icon_dir = script_dir / "icon"
+        icon_32_path = icon_dir / "icon_32x32.png"
+        icon_ico_path = icon_dir / "icon.ico"
+        icon_jpg_path = icon_dir / "icon.jpg"
+        
+        image = None
+        
+        # Try pre-generated 32x32 PNG first (best quality)
+        if icon_32_path.exists():
+            try:
+                image = Image.open(icon_32_path)
+                if image.mode != 'RGBA':
+                    image = image.convert('RGBA')
+            except Exception as e:
+                print(f"Warning: Could not load pre-generated 32x32 icon: {e}")
+        
+        # Fallback to ICO file
+        if image is None and icon_ico_path.exists():
+            try:
+                image = Image.open(icon_ico_path)
+                # Extract 32x32 size from ICO if available
+                if hasattr(image, 'sizes') and (32, 32) in image.sizes:
+                    # ICO has 32x32 size, use it
+                    image.load()
+                    # Resize to 32x32 if needed
+                    if image.size != (32, 32):
+                        image = image.resize((32, 32), Image.Resampling.LANCZOS)
+                else:
+                    # Resize to 32x32
+                    image = image.resize((32, 32), Image.Resampling.LANCZOS)
+                if image.mode != 'RGBA':
+                    image = image.convert('RGBA')
+            except Exception as e:
+                print(f"Warning: Could not load ICO for tray: {e}")
+        
+        # Fallback to JPG
+        if image is None and icon_jpg_path.exists():
+            try:
+                image = Image.open(icon_jpg_path)
+                if image.mode != 'RGBA':
+                    image = image.convert('RGBA')
+                # Resize to 32x32
+                image = image.resize((32, 32), Image.Resampling.LANCZOS)
+            except Exception as e:
+                print(f"Warning: Could not load JPG for tray: {e}")
+        
+        # Final fallback to simple icon
+        if image is None:
+            print(f"Warning: No icon file found, using fallback icon")
+            image = Image.new('RGBA', (32, 32), color=(255, 255, 255, 255))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle([8, 8, 24, 24], fill=(0, 0, 0, 255))
         
         menu = pystray.Menu(
             pystray.MenuItem("Show Window", self.show_from_tray, default=True),
@@ -349,7 +527,7 @@ class WinWSGUI:
             pystray.MenuItem("Quit", self.quit_application)
         )
         
-        self.tray_icon = pystray.Icon("winws_gui", image, "winws.exe GUI", menu)
+        self.tray_icon = pystray.Icon("winws_gui", image, "WinWS GUI", menu)
     
     def quit_application(self, icon=None, item=None):
         """Quit application completely"""
@@ -357,6 +535,14 @@ class WinWSGUI:
             self.stop_winws()
         if self.tray_icon:
             self.tray_icon.stop()
+        
+        # Clean up temporary ICO file
+        if hasattr(self, 'temp_ico_path') and self.temp_ico_path and os.path.exists(self.temp_ico_path):
+            try:
+                os.unlink(self.temp_ico_path)
+            except Exception:
+                pass
+        
         self.root.quit()
         self.root.destroy()
     
