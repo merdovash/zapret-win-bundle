@@ -1,6 +1,6 @@
 winws_run.cmd
 __pycache__
 winws_config.json
-icon_*
+icon_*.png
 icon.ico
 *.log
